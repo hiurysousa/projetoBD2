@@ -1,119 +1,136 @@
-from fastapi.responses import HTMLResponse
-from http import HTTPStatus
-
-from fastapi import Depends, FastAPI, HTTPException
-from sqlalchemy import select
-from sqlalchemy.orm import Session
-
-from fast_zero.database import get_session
-from fast_zero.models import User
-from fast_zero.schemas import Message, UserDB, UserList, UserPublic, UserSchema
-from sqlalchemy.exc import IntegrityError
-
+from fastapi import FastAPI, HTTPException
+import sqlite3
+import threading
+import time
 
 app = FastAPI()
-database = []
 
-@app.get('/', response_class=HTMLResponse)
-def read_root():
-    return """
-    <html>
-      <head>
-        <title> Nosso olá mundo!</title>
-      </head>
-      <body>
-        <h1> Olá Mundo </h1>
-      </body>
-    </html>"""
+DB_NAME = "loja_carros.db"
 
-# ...
 
-@app.get('/exercicio-html', response_class=HTMLResponse)
-def exercicio_aula_02():
-    return """
-    <html>
-      <head>
-        <title>Nosso olá mundo!</title>
-      </head>
-      <body>
-        <h1> Olá Mundo </h1>
-        <h2> Exercicio HTML </h2>
-      </body>
-    </html>"""
+# ----------------- Funções de Banco de Dados (Replicadas do setup) -----------------
 
-@app.post('/users/', status_code=HTTPStatus.CREATED, response_model=UserPublic)
-def create_user(user: UserSchema, session: Session = Depends(get_session)):
-    db_user = session.scalar(
-        select(User).where(
-            (User.username == user.username) | (User.email == user.email)
+def create_db_fastapi():
+    """Inicializa o banco de dados com a estrutura e dados iniciais."""
+    conn = sqlite3.connect(DB_NAME, timeout=5)
+    c = conn.cursor()
+
+    c.execute('''
+        CREATE TABLE IF NOT EXISTS Veiculos (
+            VeiculoID INTEGER PRIMARY KEY,
+            Modelo TEXT,
+            Status TEXT
         )
-    )
+    ''')
 
-    if db_user:
-        if db_user.username == user.username:
-            raise HTTPException(
-                status_code=HTTPStatus.CONFLICT,
-                detail='Username already exists',
-            )
-        elif db_user.email == user.email:
-            raise HTTPException(
-                status_code=HTTPStatus.CONFLICT,
-                detail='Email already exists',
-            )
-
-    db_user = User(
-        username=user.username, password=user.password, email=user.email
-    )
-    session.add(db_user)
-    session.commit()
-    session.refresh(db_user)
-
-    return db_user
-
-@app.get('/users/', response_model=UserList)
-def read_users(
-    skip: int = 0, limit: int = 100, session: Session = Depends(get_session)
-):
-    users = session.scalars(select(User).offset(skip).limit(limit)).all()
-    return {'users': users}
-@app.put('/users/{user_id}', response_model=UserPublic)
-def update_user(
-    user_id: int, user: UserSchema, session: Session = Depends(get_session)
-):
-
-    db_user = session.scalar(select(User).where(User.id == user_id))
-    if not db_user:
-        raise HTTPException(
-            status_code=HTTPStatus.NOT_FOUND, detail='User not found'
+    c.execute('''
+        CREATE TABLE IF NOT EXISTS Vendas (
+            VendaID INTEGER PRIMARY KEY AUTOINCREMENT,
+            VeiculoID INTEGER,
+            Comprador TEXT
         )
+    ''')
+
+    # Limpar e inserir o carro crítico (ID 101) para a simulação
+    c.execute("DELETE FROM Veiculos")
+    c.execute("DELETE FROM Vendas")
+    c.execute("INSERT INTO Veiculos (VeiculoID, Modelo, Status) VALUES (101, 'Fusca 1970', 'Disponivel')")
+    c.execute("INSERT INTO Veiculos (VeiculoID, Modelo, Status) VALUES (200, 'Ford Ka', 'Disponivel')")
+
+    conn.commit()
+    conn.close()
+
+
+def attempt_sale_transaction_thread(thread_id, veiculo_id, comprador_nome):
+    """Função para ser executada em threads, simulando a concorrência na API."""
+    conn = sqlite3.connect(DB_NAME, timeout=1)  # Timeout de 1 segundo
+    c = conn.cursor()
 
     try:
-        db_user.username = user.username
-        db_user.password = user.password
-        db_user.email = user.email
-        session.commit()
-        session.refresh(db_user)
+        # Início da Transação explícita com bloqueio imediato
+        c.execute('BEGIN IMMEDIATE;')
+        print(f"Thread {thread_id} ({comprador_nome}): Transação iniciada.")
 
-        return db_user
+        # 1. Verificar disponibilidade
+        c.execute("SELECT Status FROM Veiculos WHERE VeiculoID = ? AND Status = 'Disponivel'", (veiculo_id,))
+        veiculo = c.fetchone()
 
-    except IntegrityError:
-        raise HTTPException(
-            status_code=HTTPStatus.CONFLICT,
-            detail='Username or Email already exists'
-        )
+        if not veiculo:
+            print(f"Thread {thread_id}: Falha! Veículo {veiculo_id} já vendido.")
+            raise Exception("Veículo não disponível.")
 
-@app.delete('/users/{user_id}', response_model=Message)
-def delete_user(user_id: int, session: Session = Depends(get_session)):
-    db_user = session.scalar(select(User).where(User.id == user_id))
+        # Simula o tempo de espera do processo (Condição de Corrida)
+        time.sleep(3 if thread_id == 1 else 1)
 
-    if not db_user:
-        raise HTTPException(
-            status_code=HTTPStatus.NOT_FOUND, detail='User not found'
-        )
+        # 2. Atualizar Status e 3. Registrar Venda
+        c.execute("UPDATE Veiculos SET Status = 'Reservado' WHERE VeiculoID = ?", (veiculo_id,))
+        c.execute("INSERT INTO Vendas (VeiculoID, Comprador) VALUES (?, ?)", (veiculo_id, comprador_nome))
+        c.execute("UPDATE Veiculos SET Status = 'Vendido' WHERE VeiculoID = ?", (veiculo_id,))
 
-    session.delete(db_user)
-    session.commit()
+        conn.commit()
+        print(f"Thread {thread_id}: SUCESSO! COMMIT realizado.")
 
-    return {'message': 'User deleted'}
+    except sqlite3.OperationalError as e:
+        print(f"Thread {thread_id}: ERRO OPERACIONAL de BLOQUEIO: {e}. ROLLBACK implícito.")
+    except Exception as e:
+        print(f"Thread {thread_id}: ERRO LÓGICO: {e}. ROLLBACK implícito.")
+    finally:
+        conn.close()
 
 
+# ----------------- ROTAS FASTAPI -----------------
+
+@app.post("/init-db")
+def init_db():
+    """Inicializa o banco de dados e as tabelas para a simulação."""
+    try:
+        create_db_fastapi()
+        return {"status": "ok",
+                "message": "Banco de dados de carros inicializado. Carro ID 101 disponível para concorrência."}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Erro ao inicializar o DB: {e}")
+
+
+@app.post("/simulate-concurrent-sale")
+def simulate_concurrent_sale():
+    """
+    Simula dois processos (threads) tentando vender o mesmo carro (ID 101) ao mesmo tempo,
+    demonstrando o controle de concorrência.
+    """
+    VEICULO_ID = 101
+
+    thread1 = threading.Thread(target=attempt_sale_transaction_thread, args=(1, VEICULO_ID, 'Vendedor X'))
+    thread2 = threading.Thread(target=attempt_sale_transaction_thread, args=(2, VEICULO_ID, 'Vendedor Y'))
+
+    # Iniciando as transações concorrentes
+    thread1.start()
+    thread2.start()
+
+    # Esperando a conclusão das transações
+    thread1.join()
+    thread2.join()
+
+    return {"status": "ok",
+            "message": f"Simulação de concorrência concluída para Veículo {VEICULO_ID}. Cheque o console e a rota /veiculos."}
+
+
+@app.get("/veiculos")
+def get_veiculos():
+    """Retorna todos os veículos e seus status."""
+    conn = sqlite3.connect(DB_NAME, timeout=5)
+    c = conn.cursor()
+    c.execute("SELECT VeiculoID, Modelo, Status FROM Veiculos")
+    rows = c.fetchall()
+    conn.close()
+    return {"veiculos": rows}
+
+
+@app.get("/vendas")
+def get_vendas():
+    """Retorna o registro de vendas."""
+    conn = sqlite3.connect(DB_NAME, timeout=5)
+    c = conn.cursor()
+    c.execute("SELECT VendaID, VeiculoID, Comprador FROM Vendas")
+    rows = c.fetchall()
+    conn.close()
+    return {"vendas": rows}
