@@ -1,6 +1,3 @@
-from sqlalchemy import select
-from fast_zero.models import User
-
 from dataclasses import asdict
 
 from sqlalchemy import select
