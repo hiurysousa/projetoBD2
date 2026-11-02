@@ -1,7 +1,7 @@
 [project]
 name = "fast-zero"
 version = "0.1.0"
-description = ""
+description = "API educacional de uma concessionaria para demonstrar concorrencia de transacoes com FastAPI e SQLite"
 authors = [
     {name = "hiurysousa",email = "hiurysbsb@hotmail.com"}
 ]
